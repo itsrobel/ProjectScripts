@@ -1,0 +1,20 @@
+
+package templates
+
+templ Layout(title string) {
+    <!DOCTYPE html>
+    <html lang="en" data-theme="wireframe">
+        <head>
+            <meta charset="UTF-8"/>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+            <title>{ title }</title>
+            <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+            <link href="/assets/css/main.css" rel="stylesheet"/>
+        </head>
+        <body class="min-h-screen bg-base-100">
+            <main class="container mx-auto px-4 py-8">
+                { children... }
+            </main>
+        </body>
+    </html>
+}

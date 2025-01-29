@@ -1,74 +1,271 @@
-#!/usr/bin/env python3
 import os
-import subprocess
 import sys
 
+# Check if application name is provided
+if len(sys.argv) < 2:
+    print("Usage: python setup_frontend.py <app-name>")
+    sys.exit(1)
 
-def create_file(base_path, filepath, content):
-    full_path = os.path.join(base_path, filepath)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    with open(full_path, "w") as f:
-        f.write(content)
+APP_NAME = sys.argv[1]
+MODULE_NAME = APP_NAME.lower().replace(" ", "-")
 
+# Create project structure
+os.makedirs(f"{APP_NAME}-frontend/cmd/server", exist_ok=True)
+os.makedirs(f"{APP_NAME}-frontend/internal/service", exist_ok=True)
+os.makedirs(f"{APP_NAME}-frontend/internal/templates", exist_ok=True)
+os.makedirs(f"{APP_NAME}-frontend/proto/apiv1", exist_ok=True)
+os.makedirs(f"{APP_NAME}-frontend/gen", exist_ok=True)
+os.makedirs(f"{APP_NAME}-frontend/assets/css", exist_ok=True)
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python setup_frontend.py <app-name>")
-        sys.exit(1)
+os.chdir(f"{APP_NAME}-frontend")
 
-    app_name = sys.argv[1]
-    module_name = app_name.lower().replace(" ", "-")
-    project_dir = f"{app_name}-frontend"
+# Initialize Go module
+os.system(f"go mod init {MODULE_NAME}-frontend")
 
-    # Create base directory
-    os.makedirs(project_dir, exist_ok=True)
+# Install dependencies
+os.system("go mod tidy")
+os.system(
+    "go get connectrpc.com/connect golang.org/x/net/http2 github.com/rs/cors github.com/a-h/templ"
+)
+os.system("go install github.com/bufbuild/buf/cmd/buf@latest")
+os.system("go install github.com/a-h/templ/cmd/templ@latest")
 
-    # Create project structure
-    subdirs = [
-        "cmd/client",
-        "internal/templates",
-        "internal/client",
-        "proto/api/v1",
-        "static/css",
-        "static/js/gen",
-    ]
+# Create base layout template
+with open("internal/templates/layout.templ", "w") as f:
+    f.write("""
+package templates
 
-    for subdir in subdirs:
-        os.makedirs(os.path.join(project_dir, subdir), exist_ok=True)
+templ Layout(title string) {
+    <!DOCTYPE html>
+    <html lang="en" data-theme="wireframe">
+        <head>
+            <meta charset="UTF-8"/>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+            <title>{ title }</title>
+            <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+            <link href="/assets/css/main.css" rel="stylesheet"/>
+        </head>
+        <body class="min-h-screen bg-base-100">
+            <main class="container mx-auto px-4 py-8">
+                { children... }
+            </main>
+        </body>
+    </html>
+}
+""")
 
-    # Change to project directory
-    os.chdir(project_dir)
+# Create index template
+with open("internal/templates/index.templ", "w") as f:
+    f.write("""
+package templates
 
-    # Initialize Go module
-    subprocess.run(["go", "mod", "init", f"{module_name}-frontend"])
+templ Index() {
+    @Layout("Home") {
+        <div class="max-w-md mx-auto">
+            <form class="space-y-4" hx-post="/greet" hx-target="#greeting" hx-swap="innerHTML">
+                <div class="form-control">
+                    <label class="label">
+                        <span class="label-text">Name</span>
+                    </label>
+                    <input type="text" name="name" class="input input-bordered" required/>
+                </div>
+                <button type="submit" class="btn btn-primary w-full">
+                    Greet
+                </button>
+            </form>
+            <div id="greeting" class="mt-4 text-center"></div>
+        </div>
+    }
+}
 
-    # Initialize npm and install dependencies
-    subprocess.run(["npm", "init", "-y"])
-    subprocess.run(
-        [
-            "npm",
-            "install",
-            "@connectrpc/connect",
-            "@connectrpc/connect-web",
-            "@bufbuild/protobuf",
-            "@bufbuild/buf",
-        ]
+templ GreetingResponse(greeting string) {
+    <div class="alert alert-success">
+        <span>{ greeting }</span>
+    </div>
+}
+""")
+
+# Create main.css for Tailwind
+with open("assets/css/main.css", "w") as f:
+    f.write("""
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+""")
+
+# Create handlers.go
+with open("internal/service/handlers.go", "w") as f:
+    f.write(f"""
+package service
+
+import (
+    "context"
+    "net/http"
+    "{MODULE_NAME}-frontend/internal/services/apiv1"
+    "{MODULE_NAME}-frontend/internal/services/apiv1/apiv1connect"
+    "{MODULE_NAME}-frontend/internal/templates"
+    "connectrpc.com/connect"
+)
+
+type Handlers struct {{
+    greetClient apiv1connect.GreetServiceClient
+}}
+
+func NewHandlers(greetClient apiv1connect.GreetServiceClient) *Handlers {{
+    return &Handlers{{
+        greetClient: greetClient,
+    }}
+}}
+
+func (h *Handlers) Index(w http.ResponseWriter, r *http.Request) {{
+    component := templates.Index()
+    component.Render(context.Background(), w)
+}}
+
+func (h *Handlers) HandleGreet(w http.ResponseWriter, r *http.Request) {{
+    if err := r.ParseForm(); err != nil {{
+        http.Error(w, "Failed to parse form", http.StatusBadRequest)
+        return
+    }}
+
+    name := r.FormValue("name")
+    req := connect.NewRequest(&apiv1.GreetRequest{{Name: name}})
+    
+    resp, err := h.greetClient.Greet(r.Context(), req)
+    if err != nil {{
+        http.Error(w, "Failed to greet", http.StatusInternalServerError)
+        return
+    }}
+
+    component := templates.GreetingResponse(resp.Msg.Greeting)
+    component.Render(r.Context(), w)
+}}
+""")
+
+# Update server implementation
+with open("cmd/server/main.go", "w") as f:
+    f.write(f"""
+package main
+
+import (
+    "log"
+    "net/http"
+    "{MODULE_NAME}-frontend/internal/services/apiv1/apiv1connect"
+    "{MODULE_NAME}-frontend/internal/service"
+    "github.com/rs/cors"
+)
+
+func main() {{
+    mux := http.NewServeMux()
+    
+    
+    // Initialize HTTP client for internal gRPC calls
+    client := apiv1connect.NewGreetServiceClient(
+        http.DefaultClient,
+        "http://localhost:8080",
     )
+    
+    // Initialize handlers
+    handlers := service.NewHandlers(client)
+    
+    // Routes
+    mux.HandleFunc("/", handlers.Index)
+    mux.HandleFunc("/greet", handlers.HandleGreet)
+    
+    // Serve static files
+    fs := http.FileServer(http.Dir("assets"))
+    mux.Handle("/assets/", http.StripPrefix("/assets/", fs))
+    
+    // Configure CORS
+    corsHandler := cors.New(cors.Options{{
+        AllowedOrigins: []string{{"*"}},
+        AllowedMethods: []string{{"GET", "POST", "OPTIONS"}},
+        AllowedHeaders: []string{{"Accept", "Content-Type", "Connect-Protocol-Version"}},
+    }})
 
-    # Install Go dependencies
-    subprocess.run(["go", "mod", "tidy"])
-    subprocess.run(
-        ["go", "get", "github.com/a-h/templ", "github.com/bufbuild/connect-go"]
-    )
+    wrappedHandler := corsHandler.Handler(mux)
+    
+    log.Println("Server starting on :8080")
+    if err := http.ListenAndServe(":8080", wrappedHandler); err != nil {{
+        log.Fatal(err)
+    }}
+}}
+""")
 
-    # Install templ
-    subprocess.run(["go", "install", "github.com/a-h/templ/cmd/templ@latest"])
+# Update Makefile
+# with open("Makefile", "w") as f:
+#     f.write("""
+# .PHONY: generate build run setup-frontend dev
+#
+# generate:
+# 	buf generate
+# 	templ generate
+#
+# build: generate
+# 	go build -o bin/server cmd/server/main.go
+#
+# run: generate
+# 	go run cmd/server/main.go
+#
+# setup-frontend:
+# 	bun install
+#
+# dev:
+# 	bun run dev
+#
+# watch:
+# 	templ generate --watch
+# """)
 
-    files = {
-        "proto/api/v1/service.proto": f"""syntax = "proto3";
+with open("Taskfile.yaml", "w") as f:
+    f.write(f"""
 
-package api.v1;
-option go_package = "{module_name}-frontend/gen/api/v1;apiv1";
+version: "3"
+
+tasks:
+  dev:
+    cmds:
+      - bun run build
+      - templ generate
+      - go run cmd/server/main.go
+  build:
+    cmds:
+      - bun run build
+      - templ generate
+      - go build -o ./bin/app cmd/server/main.go
+
+    desc: "Build the Go project"
+  #TODO: Make tests later
+  # test:
+  #   cmds:
+  #     - go test ./...
+  #   desc: "Run tests"
+
+  docker-build:
+    cmds:
+      - docker build -t {MODULE_NAME} .
+  docker-run:
+    cmds:
+      - docker run -d -p 80:8080 --name {MODULE_NAME}_frontend_container {MODULE_NAME} 
+  lint:
+    cmds:
+      - golangci-lint run
+    desc: "Lint the code"
+
+  clean:
+    cmds:
+      - rm -rf myapp
+    desc: "Clean the build artifacts"
+
+
+  """)
+
+with open("proto/apiv1/service.proto", "w") as f:
+    f.write(f"""
+syntax = "proto3";
+
+package apiv1;
+option go_package = "{MODULE_NAME}-frontend/internal/services/apiv1";
 
 service GreetService {{
   rpc Greet(GreetRequest) returns (GreetResponse) {{}}
@@ -80,8 +277,13 @@ message GreetRequest {{
 
 message GreetResponse {{
   string greeting = 1;
-}}""",
-        "buf.yaml": """version: v2
+}}
+""")
+
+# Create buf.yaml
+with open("buf.yaml", "w") as f:
+    f.write("""
+version: v2
 modules:
   - path: proto
 lint:
@@ -89,144 +291,118 @@ lint:
     - STANDARD
 breaking:
   use:
-    - FILE""",
-        "buf.gen.yaml": """version: v2
+    - FILE
+""")
+
+# Create buf.gen.yaml
+with open("buf.gen.yaml", "w") as f:
+    f.write("""
+version: v2
+clean: true
+managed:
+  enabled: true
 plugins:
-  - remote: buf.build/bufbuild/connect-web
-    opt: target=ts
-    out: static/js/gen
-  - remote: buf.build/bufbuild/es
-    opt: target=ts
-    out: static/js/gen""",
-        "internal/templates/base.templ": f"""package templates
+  - remote: buf.build/connectrpc/go
+    out: internal/services
+    opt:
+      - paths=source_relative
 
-templ Base() {{
-    <!DOCTYPE html>
-    <html lang="en">
-        <head>
-            <meta charset="UTF-8"/>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-            <title>{app_name}</title>
-            <script src="https://unpkg.com/@connectrpc/connect-web@v1.2.0/dist/umd/connect-web.js"></script>
-            <script src="https://unpkg.com/@bufbuild/protobuf@v1.3.0/dist/umd/protobuf.js"></script>
-            <script src="/static/js/gen/proto.js"></script>
-            <script src="https://cdn.tailwindcss.com"></script>
-        </head>
-        <body class="bg-gray-100">
-            <div class="container mx-auto px-4 py-8">
-                {{ children... }}
-            </div>
-        </body>
-    </html>
-}}""",
-        "internal/templates/index.templ": f"""package templates
+  - remote: buf.build/protocolbuffers/go
+    out: internal/services
+    opt:
+      - paths=source_relative
+""")
 
-templ Index() {{
-    @Base() {{
-        <div class="max-w-md mx-auto bg-white rounded-xl shadow-md overflow-hidden md:max-w-2xl p-6">
-            <h1 class="text-2xl font-bold mb-4">{app_name}</h1>
-            <div class="mb-4">
-                <input 
-                    type="text" 
-                    id="nameInput" 
-                    placeholder="Enter your name"
-                    class="w-full px-3 py-2 border rounded-md"
-                />
-            </div>
-            <button 
-                onclick="sendGreeting()"
-                class="bg-blue-500 text-white px-4 py-2 rounded-md hover:bg-blue-600"
-            >
-                Send Greeting
-            </button>
-            <div id="response" class="mt-4 text-gray-700"></div>
-        </div>
-        <script>
-            const {{ createPromiseClient, createConnectTransport }} = window.ConnectWeb;
+# Create service implementation
+# with open("internal/service/greet.go", "w") as f:
+#     f.write(f"""
+# package service
+#
+# import (
+#     "context"
+#     "fmt"
+#     apiv1 "{MODULE_NAME}-frontend/internal/services/apiv1"
+#     "connectrpc.com/connect"
+# )
+#
+# type GreetServer struct{{}}
+#
+# func NewGreetServer() *GreetServer {{
+#     return &GreetServer{{}}
+# }}
+#
+# func (s *GreetServer) Greet(
+#     ctx context.Context,
+#     req *connect.Request[apiv1.GreetRequest],
+# ) (*connect.Response[apiv1.GreetResponse], error) {{
+#     response := connect.NewResponse(&apiv1.GreetResponse{{
+#         Greeting: fmt.Sprintf("Hello, %s!", req.Msg.Name),
+#     }})
+#     return response, nil
+# }}
+# """)
 
-            const transport = createConnectTransport({{
-                baseUrl: "http://localhost:8080",
-                useBinaryFormat: true,
-                interceptors: [],
-            }});
 
-            const client = createPromiseClient(window.Api.V1.GreetService, transport);
+# Create tailwind.config.js
+with open("tailwind.config.js", "w") as f:
+    f.write("""
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ["./internal/templates/**/*.templ"],
+  plugins: [require("@tailwindcss/typography"), require("daisyui")],
+  theme: {
+    fontFamily: {
+      'excali': ["Excalifont", "sans-serif"],
+      'mono': ["SFMono-Regular", 'jetbrains mono', "monospace"],
+    },
+  },
+  daisyui: {
+    themes: ["wireframe", "dim"],
+    base: true,
+    styled: true,
+    utils: true,
+    prefix: "",
+    themeRoot: ":root",
+  },
+  darkMode: ["selector", '[data-theme="dim"]'],
+};
+""")
 
-            async function sendGreeting() {{
-                const name = document.getElementById('nameInput').value;
-                try {{
-                    const response = await client.greet({{
-                        name: name
-                    }});
-                    document.getElementById('response').textContent = response.greeting;
-                }} catch (error) {{
-                    console.error('Error:', error);
-                    document.getElementById('response').textContent = 'Error: ' + error.message;
-                }}
-            }}
-        </script>
-    }}
-}}""",
-        "cmd/client/main.go": f"""package main
+# Create package.json
+with open("package.json", "w") as f:
+    f.write("""
+{
+  "name": "app",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "bunx tailwindcss -i ./assets/css/main.css -o ./assets/css/main.css --watch",
+    "build": "bunx tailwindcss -i ./assets/css/main.css -o ./assets/css/main.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.10",
+    "bun-types": "latest",
+    "daisyui": "^4.4.19",
+    "tailwindcss": "^3.3.6"
+  }
+}
+""")
 
-import (
-    "context"
-    "log"
-    "net/http"
-    "{module_name}-frontend/internal/templates"
-)
-
-func main() {{
-    mux := http.NewServeMux()
-
-    mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
-
-    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {{
-        if r.URL.Path != "/" {{
-            http.NotFound(w, r)
-            return
-        }}
-        templates.Index().Render(context.Background(), w)
-    }})
-
-    log.Println("Frontend server starting on :3000")
-    if err := http.ListenAndServe(":3000", mux); err != nil {{
-        log.Fatal(err)
-    }}
-}}""",
-        "Makefile": """
-.PHONY: build run templ generate-js
-
-generate-js:
-	npx buf generate proto --template buf.gen.yaml
-
-templ:
-	templ generate
-
-build: templ generate-js
-	go build -o bin/client cmd/client/main.go
-
-run: templ generate-js
-	go run cmd/client/main.go""",
-        ".gitignore": """bin/
-*_templ.go
+# Create gitignore
+with open(".gitignore", "w") as f:
+    f.write("""
+bin/
+gen/
 node_modules/
-static/js/gen/
-package-lock.json""",
-    }
+**/*_templ.go
+""")
 
-    # Create all files
-    for filepath, content in files.items():
-        create_file(".", filepath, content)
+# Generate code
+os.system("buf generate")
 
-    # Generate code
-    subprocess.run(["npx", "buf", "generate", "proto", "--template", "buf.gen.yaml"])
-    subprocess.run(["templ", "generate"])
-
-    print("Frontend setup complete!")
-    print("Run 'make run' to start the frontend server")
-
-
-if __name__ == "__main__":
-    main()
-
+print("frontend setup complete!")
+print("To start development:")
+print("1. Run 'make setup-frontend' to install frontend dependencies")
+print("2. Run 'make watch' in one terminal to watch templ files")
+print("3. Run 'make dev' in another terminal to watch CSS files")
+print("4. Run 'make run' to start the server")

@@ -1,0 +1,27 @@
+
+package templates
+
+templ Index() {
+    @Layout("Home") {
+        <div class="max-w-md mx-auto">
+            <form class="space-y-4" hx-post="/greet" hx-target="#greeting" hx-swap="innerHTML">
+                <div class="form-control">
+                    <label class="label">
+                        <span class="label-text">Name</span>
+                    </label>
+                    <input type="text" name="name" class="input input-bordered" required/>
+                </div>
+                <button type="submit" class="btn btn-primary w-full">
+                    Greet
+                </button>
+            </form>
+            <div id="greeting" class="mt-4 text-center"></div>
+        </div>
+    }
+}
+
+templ GreetingResponse(greeting string) {
+    <div class="alert alert-success">
+        <span>{ greeting }</span>
+    </div>
+}

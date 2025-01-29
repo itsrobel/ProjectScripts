@@ -1,0 +1,17 @@
+
+syntax = "proto3";
+
+package apiv1;
+option go_package = "zb-frontend/internal/services/apiv1";
+
+service GreetService {
+  rpc Greet(GreetRequest) returns (GreetResponse) {}
+}
+
+message GreetRequest {
+  string name = 1;
+}
+
+message GreetResponse {
+  string greeting = 1;
+}

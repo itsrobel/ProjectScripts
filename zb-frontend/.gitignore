@@ -1,5 +1,0 @@
-
-bin/
-gen/
-node_modules/
-**/*_templ.go

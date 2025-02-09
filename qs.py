@@ -1,23 +1,42 @@
 import argparse
 import os
-import subprocess
-from typing import Optional
 
 
-def create_shared_structure(name: str):
+def create_shared_structure(name: str, git: bool):
     # Create main project directory
     os.makedirs(f"{name}/internal/handlers", exist_ok=True)
     os.makedirs(f"{name}/protos/apiv1", exist_ok=True)
-    os.makedirs(f"{name}/bin", exist_ok=True)
+    bin_path = os.path.abspath(f"{name}/bin")  # Absolute path required
+    os.environ["GOBIN"] = bin_path
+    os.makedirs(bin_path, exist_ok=True)
 
     os.chdir(name)
-    os.system(f"go mod init {name}")
-    os.system("git init --initial-branch=main")
+    os.system(f"go mod init {(f'github.com/itsrobel/{name}' if git else name)}")
+    if git:
+        os.system("git init --initial-branch=main")
 
-    os.system("go mod tidy")
 
+def setup_build(module_name: str, module_path: str):
+    with open("protos/apiv1/service.proto", "w") as f:
+        f.write(f"""
+syntax = "proto3";
 
-def setup_build(name: str):
+package apiv1;
+option go_package = "{module_path}/internal/services/apiv1";
+
+service GreetService {{
+rpc Greet(GreetRequest) returns (GreetResponse) {{}}
+}}
+
+message GreetRequest {{
+string name = 1;
+}}
+
+message GreetResponse {{
+string greeting = 1;
+}}
+    """)
+
     with open("buf.yaml", "w") as f:
         f.write("""
 # For details on buf.yaml configuration, visit https://buf.build/docs/configuration/v2/buf-yaml
@@ -46,11 +65,11 @@ clean: true
 managed:
   enabled: true
 plugins:
-  - remote: buf.build/connectrpc/go
+  - local: ./bin/protoc-gen-go
     out: internal/services
     opt:
       - paths=source_relative
-  - remote: buf.build/protocolbuffers/go
+  - local: ./bin/protoc-gen-connect-go
     out: internal/services
     opt:
       - paths=source_relative
@@ -59,35 +78,71 @@ inputs:
   - directory: protos
     """)
 
-    with open("Taskfile.yaml", "w") as f:
+    with open("air-server.toml", "w") as f:
+        f.write("""
+[build]
+cmd = "./bin/buf generate && go build -o ./tmp/server cmd/server/main.go"
+bin = "./tmp/server"
+include_ext = ["go", "templ", "proto"]
+exclude_regex = ["_templ.go", ".pb.go", ".connect.go", "node_modules/.*"]
+
+delay = 1000
+        """)
+
+    with open("air-client.toml", "w") as f:
+        f.write("""
+[build]
+  cmd = '''
+    ./bin/templ generate &&
+    bunx tailwindcss -i ./assets/css/app.css -o ./public/css/main.css &&
+    ./bin/buf generate &&
+    go build -o ./tmp/client cmd/client/main.go
+  '''
+  
+  bin = "./tmp/client"
+  include_ext = ["go", "templ", "proto"]
+  exclude_regex = ["_templ.go", ".pb.go", ".connect.go", "node_modules/.*"]
+
+[log]
+  main_only = true
+  log_only_main_loop = true
+
+delay = 1000
+        """)
+
+    with open("taskfile.yaml", "w") as f:
         f.write(f"""
 version: "3"
 
 tasks:
   dev-client:
     cmds:
-      - bunx tailwindcss -i ./assets/css/app.css -o ./public/css/main.css
-      - templ generate
-      - buf generate
-      - go run cmd/client/main.go
+      - ./bin/air -c ./air-client.toml
+    env:
+      PORT: 3000
   dev-server:
     cmds:
-      - buf generate
-      - go run cmd/server/main.go
+      - ./bin/air -c ./air-server.toml
+    env:
+      PORT: 8080
+  build-deps:
+    cmds:
+      - go build -o bin/deps cmd/deps/main.go
+      - ./bin/deps
   build:
     cmds:
       - bunx tailwindcss -i ./assets/css/app.css -o ./public/css/main.css
-      - templ generate
+      - ./bin/templ generate
       - go build -o ./bin/server cmd/server/main.go
       - go build -o ./bin/client cmd/client/main.go
 
     desc: "Build the Go project"
   docker-build:
     cmds:
-      - docker build -t {name} .
+      - docker build -t {module_name} .
   docker-run:
     cmds:
-      - docker run -d -p 80:8080 --name {name}_container {name} 
+      - docker run -d -p 80:8080 --name {module_name}_container {module_name} 
   lint:
     cmds:
       - golangci-lint run
@@ -100,28 +155,85 @@ tasks:
 
 
   """)
+    os.system("go install github.com/bufbuild/buf/cmd/buf@latest")
+    os.system("go install google.golang.org/protobuf/cmd/protoc-gen-go@latest")
+    os.system("go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest")
+    os.system("go install github.com/air-verse/air@latest")
+    os.system("go install github.com/go-task/task/v3/cmd/task@latest")
 
+    os.makedirs("cmd/deps", exist_ok=True)
+    with open("cmd/deps/main.go", "w") as f:
+        f.write("""
+package main
 
-def setup_internal_shared(name: str):
-    with open("protos/apiv1/service.proto", "w") as f:
-        f.write(f"""
-syntax = "proto3";
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
 
-package apiv1;
-option go_package = "{name}/internal/services/apiv1";
+	"golang.org/x/sync/errgroup"
+)
 
-service GreetService {{
-rpc Greet(GreetRequest) returns (GreetResponse) {{}}
-}}
+func main() {
+	binDir, _ := filepath.Abs("./bin")
+	os.Setenv("GOBIN", binDir)
 
-message GreetRequest {{
-string name = 1;
-}}
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		fmt.Printf("🚨 Error creating bin directory: %v\n", err)
+		os.Exit(1)
+	}
 
-message GreetResponse {{
-string greeting = 1;
-}}
-    """)
+	tools := []string{
+		"github.com/bufbuild/buf/cmd/buf@latest",
+		"google.golang.org/protobuf/cmd/protoc-gen-go@latest",
+		"connectrpc.com/connect/cmd/protoc-gen-connect-go@latest",
+		"github.com/air-verse/air@latest",
+	}
+
+	var (
+		g, _  = errgroup.WithContext(context.Background())
+		mu    sync.Mutex
+		count int
+	)
+
+	fmt.Println("🚀 Starting parallel installation...")
+
+	for _, tool := range tools {
+		tool := tool // Capture range variable
+		g.Go(func() error {
+			cmd := exec.Command("go", "install", tool)
+
+			// Capture output for cleaner display
+			output, err := cmd.CombinedOutput()
+
+			mu.Lock()
+			count++
+			fmt.Printf("📦 [%d/%d] %s\n", count, len(tools), tool)
+			if len(output) > 0 {
+				fmt.Println(string(output))
+			}
+			mu.Unlock()
+
+			return err
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		fmt.Printf("\n❌ Installation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n✅ Successfully installed %d tools to %s\n", len(tools), binDir)
+	fmt.Println("Installed binaries:")
+	files, _ := os.ReadDir(binDir)
+	for _, f := range files {
+		fmt.Printf(" - %s\n", f.Name())
+	}
+}
+        """)
 
 
 def setup_server(name: str):
@@ -129,7 +241,6 @@ def setup_server(name: str):
     os.makedirs("cmd/server", exist_ok=True)
     # Install backend dependencies
     os.system("go get connectrpc.com/connect golang.org/x/net/http2 github.com/rs/cors")
-    os.system("go install github.com/bufbuild/buf/cmd/buf@latest")
 
     # Create backend-specific files
     with open("cmd/server/main.go", "w") as f:
@@ -196,7 +307,7 @@ func (s *GreetServer) Greet(
     """)
 
 
-def setup_client(name: str):
+def setup_client(model_path: str):
     os.makedirs("cmd/client", exist_ok=True)
     os.makedirs("internal/templates", exist_ok=True)
     os.makedirs("assets/css", exist_ok=True)
@@ -208,7 +319,7 @@ def setup_client(name: str):
 
     # Create frontend-specific files
     setup_client_templates()
-    setup_client_js(name)
+    setup_client_js()
     with open("cmd/client/main.go", "w") as f:
         f.write(f"""
 package main
@@ -216,8 +327,8 @@ package main
 import (
     "log"
     "net/http"
-    "{name}/internal/services/apiv1/apiv1connect"
-    "{name}/internal/handlers"
+    "{model_path}/internal/services/apiv1/apiv1connect"
+    "{model_path}/internal/handlers"
     "github.com/rs/cors"
 )
 
@@ -268,9 +379,9 @@ package handlers
 import (
     "context"
     "net/http"
-    "{name}/internal/services/apiv1"
-    "{name}/internal/services/apiv1/apiv1connect"
-    "{name}/internal/templates"
+    "{model_path}/internal/services/apiv1"
+    "{model_path}/internal/services/apiv1/apiv1connect"
+    "{model_path}/internal/templates"
     "connectrpc.com/connect"
 )
 
@@ -310,7 +421,7 @@ func (h *GreetClient) HandleGreet(w http.ResponseWriter, r *http.Request) {{
 """)
 
 
-def setup_client_js(name: str):
+def setup_client_js():
     # TODO: setup the bun env
     os.system("bun init")
     os.system("bun i tailwindcss @tailwindcss/cli daisyui@beta")
@@ -392,24 +503,20 @@ templ GreetingResponse(greeting string) {
 }
 """)
 
-    os.system("templ generate")
 
-
-def create_project(name: str, project_type: str):
+def create_project(name: str, project_type: str, git: bool):
     module_name = name.lower().replace(" ", "-")
+    module_git_path = f"github.com/itsrobel/{module_name}"
+    create_shared_structure(module_name, git)
+    setup_build(module_name, module_git_path if git else module_name)
+    if project_type in ["backend", "fullstack"]:
+        setup_server(module_git_path if git else module_name)
 
-    create_shared_structure(module_name)
+    if project_type in ["frontend", "fullstack"]:
+        setup_client(module_git_path if git else module_name)
+        os.system("./bin/templ generate")
 
-    setup_build(module_name)
-    setup_internal_shared(module_name)
-
-    if project_type in ["backend", "both"]:
-        setup_server(module_name)
-
-    if project_type in ["frontend", "both"]:
-        setup_client(module_name)
-
-    os.system("buf generate")
+    os.system("./bin/buf generate")
 
 
 def main():
@@ -417,13 +524,14 @@ def main():
     parser.add_argument("name", help="Name of the project")
     parser.add_argument(
         "--type",
-        choices=["frontend", "backend", "both"],
-        default="both",
+        choices=["frontend", "backend", "fullstack"],
+        default="fullstack",
         help="Type of project to generate",
     )
+    parser.add_argument("--no-git", action="store_false", dest="git", help="Use git")
 
     args = parser.parse_args()
-    create_project(args.name, args.type)
+    create_project(args.name, args.type, args.git)
 
 
 if __name__ == "__main__":
